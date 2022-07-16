@@ -36,6 +36,11 @@ case class DCacheParams(
     acquireBeforeRelease: Boolean = false,
     pipelineWayMux: Boolean = false,
     clockGate: Boolean = false,
+    /* start: MLC */
+    enableMLC: Boolean = true,
+    numVPTEntries: Int = 4,
+    numNonEnclaveWays: Int = 0,
+    /* end: MLC */
     scratch: Option[BigInt] = None) extends L1CacheParams {
 
   def tagCode: Code = Code.fromString(tagECC)
@@ -58,7 +63,9 @@ case class DCacheParams(
 trait HasL1HellaCacheParameters extends HasL1CacheParameters with HasCoreParameters {
   val cacheParams = tileParams.dcache.get
   val cfg = cacheParams
-
+  /* start: MLC */
+  def vptIdxBits = log2Up(cfg.numVPTEntries)
+  /* end: MLC */
   def wordBits = coreDataBits
   def wordBytes = coreDataBytes
   def subWordBits = cacheParams.subWordBits.getOrElse(wordBits)
@@ -285,7 +292,7 @@ trait HasHellaCacheModule {
 
 class L1Metadata(implicit p: Parameters) extends L1HellaCacheBundle()(p) {
   val coh = new ClientMetadata
-  val tag = UInt(width = tagBits)
+  val tag = UInt(width = tagBits + vptIdxBits) // modified for MLC
 }
 
 object L1Metadata {
@@ -300,7 +307,7 @@ object L1Metadata {
 class L1MetaReadReq(implicit p: Parameters) extends L1HellaCacheBundle()(p) {
   val idx    = UInt(width = idxBits)
   val way_en = UInt(width = nWays)
-  val tag    = UInt(width = tagBits)
+  val tag    = UInt(width = tagBits + vptIdxBits) // modified for MLC
 }
 
 class L1MetaWriteReq(implicit p: Parameters) extends L1MetaReadReq()(p) {
@@ -323,7 +330,7 @@ class L1MetadataArray[T <: L1Metadata](onReset: () => T)(implicit p: Parameters)
   when (rst) { rst_cnt := rst_cnt+UInt(1) }
 
   val metabits = rstVal.getWidth
-  val tag_array = SeqMem(nSets, Vec(nWays, UInt(width = metabits)))
+  val tag_array = SeqMem(nSets, Vec(nWays, UInt(width = metabits + vptIdxBits)))
   val wen = rst || io.write.valid
   when (wen) {
     tag_array.write(waddr, Vec.fill(nWays)(wdata), wmask)

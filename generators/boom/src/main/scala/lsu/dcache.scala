@@ -264,6 +264,36 @@ class BoomL1DataReadReq(implicit p: Parameters) extends BoomBundle()(p) {
   val valid = Vec(memWidth, Bool())
 }
 
+class VPT(implicit p: Parameters) extends BoomModule()(p) 
+  with HasL1HellaCacheParameters
+  with HasBoomCoreParameters
+{
+  val io = IO(new BoomBundle {
+    val idx        = Input(Vec(5, UInt(vptIdxBits.W))) //VPT index - comes from address
+    val cacheletID = Output(Vec(5, UInt(vptIdxBits.W)))
+    val wayMask    = Output(UInt((nWays - cfg.numNonEnclaveWays).W))
+  })
+
+  val cacheletIDArray = Reg(Vec(cfg.numVPTEntries, UInt(vptIdxBits.W)))
+  val wayMaskArray = Reg(Vec(cfg.numVPTEntries, UInt((nWays - cfg.numNonEnclaveWays).W)))
+  
+  for (i <- 0 to cfg.numVPTEntries - 1) {
+    // assign the cacheletIDs in reverse order
+    cacheletIDArray(i) := (cfg.numVPTEntries - 1 - i).U(vptIdxBits.W) 
+    wayMaskArray(i) := ~0.U((nWays - cfg.numNonEnclaveWays).W) // make wayMask all 1s
+  }
+
+  // could always switch this to a map, easier to read like this for now though 
+  io.cacheletID(0) := cacheletIDArray(io.idx(0)) // remaps meta write
+  io.cacheletID(1) := cacheletIDArray(io.idx(1)) // remaps meta read
+  io.cacheletID(2) := cacheletIDArray(io.idx(2)) // remaps data write
+  io.cacheletID(3) := cacheletIDArray(io.idx(3)) // remaps data read
+  io.cacheletID(4) := cacheletIDArray(io.idx(4)) // remaps request?
+
+  // haven't implemented the waymask yet
+  io.wayMask := wayMaskArray(io.idx(0))
+}
+
 abstract class AbstractBoomDataArray(implicit p: Parameters) extends BoomModule with HasL1HellaCacheParameters {
   val io = IO(new BoomBundle {
     val read  = Input(Vec(memWidth, Valid(new L1DataReadReq)))
@@ -427,6 +457,15 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
 
   val t_replay :: t_probe :: t_wb :: t_mshr_meta_read :: t_lsu :: t_prefetch :: Nil = Enum(6)
 
+  val vpt = Module(new VPT)
+  vpt.io := DontCare
+  val enableMLC = cfg.enableMLC
+  val numVPTEntries = cfg.numVPTEntries
+  val numNonEnclaveWays = cfg.numNonEnclaveWays
+
+  printf(p"--------- New Cycle --------\n")
+  //dontTouch(vpt)
+
   val wb = Module(new BoomWritebackUnit)
   val prober = Module(new BoomProbeUnit)
   val mshrs = Module(new BoomMSHRFile)
@@ -448,9 +487,46 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
   metaReadArb.io.in := DontCare
   for (w <- 0 until memWidth) {
     meta(w).io.write.valid := metaWriteArb.io.out.fire
-    meta(w).io.write.bits  := metaWriteArb.io.out.bits
     meta(w).io.read.valid  := metaReadArb.io.out.valid
-    meta(w).io.read.bits   := metaReadArb.io.out.bits.req(w)
+    if (enableMLC){
+      meta(w).io.write.bits  := metaWriteArb.io.out.bits // ?
+      val metaWriteVptIdx = metaWriteArb.io.out.bits.idx >> (idxBits - vptIdxBits) // upper bits of set index
+      vpt.io.idx(0) := metaWriteVptIdx
+      val metaWriteNewIdx = Cat(vpt.io.cacheletID(0), metaWriteArb.io.out.bits.idx(idxBits-vptIdxBits-1,0))
+      meta(w).io.write.bits.idx := metaWriteNewIdx
+      meta(w).io.write.bits.data.tag  := Cat(metaWriteVptIdx(vptIdxBits-1,0), metaWriteArb.io.out.bits.data.tag)
+      meta(w).io.write.bits.tag := Cat(metaWriteVptIdx(vptIdxBits-1,0), metaWriteArb.io.out.bits.data.tag)
+      when (meta(w).io.write.valid && (w == 0).B) {
+        printf(p"- Meta Write -\n")
+        printf(p"\tBefore Remapping = ${metaWriteArb.io.out.bits}\n")
+        printf("\tmetaWriteSetIdx = 0b%b\n", metaWriteArb.io.out.bits.idx)
+        printf("\tmetaWriteVptIdx = 0b%b\n", metaWriteVptIdx)
+        printf("\tmetaWriteNewSetIdx = 0b%b\n", metaWriteNewIdx)
+        printf("\tmetaWriteTag = 0b%b\n", meta(w).io.write.bits.data.tag)
+        printf(p"\tAfter Remapping = ${meta(w).io.write.bits}\n")
+      }
+
+      meta(w).io.read.bits   := metaReadArb.io.out.bits.req(w) // ?
+      val metaReadVptIdx = metaReadArb.io.out.bits.req(w).idx >> (idxBits - vptIdxBits) // upper bits of set index
+      vpt.io.idx(1) := metaReadVptIdx
+      val metaReadNewIdx = Cat(vpt.io.cacheletID(1), metaReadArb.io.out.bits.req(w).idx(idxBits-vptIdxBits-1, 0))
+      meta(w).io.read.bits.tag := Cat(metaReadVptIdx(vptIdxBits-1,0), metaReadArb.io.out.bits.req(w).tag)
+      meta(w).io.read.bits.way_en := metaReadArb.io.out.bits.req(w).way_en
+      meta(w).io.read.bits.idx := metaReadNewIdx
+      when (meta(w).io.read.valid && (w == 0).B) {
+        printf(p"- Meta Read -\n")
+        printf(p"\tBefore Remapping = ${metaReadArb.io.out.bits.req(w)}\n")
+        printf("\tmetaReadSetIdx = 0b%b\n", metaReadArb.io.out.bits.req(w).idx)
+        printf("\tmetaReadVptIdx = 0b%b\n", metaReadVptIdx)
+        printf("\tmetaReadNewSetIdx = 0b%b\n", metaReadNewIdx)
+        printf("\tmetaReadTag = 0b%b\n", meta(w).io.read.bits.tag)
+        printf(p"\tAfter Remapping = ${meta(w).io.read.bits}\n")
+      }
+    }
+    else{
+      meta(w).io.write.bits  := metaWriteArb.io.out.bits
+      meta(w).io.read.bits   := metaReadArb.io.out.bits.req(w)
+    }
   }
   metaReadArb.io.out.ready  := meta.map(_.io.read.ready).reduce(_||_)
   metaWriteArb.io.out.ready := meta.map(_.io.write.ready).reduce(_||_)
@@ -465,12 +541,51 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
 
   for (w <- 0 until memWidth) {
     data.io.read(w).valid := dataReadArb.io.out.bits.valid(w) && dataReadArb.io.out.valid
-    data.io.read(w).bits  := dataReadArb.io.out.bits.req(w)
+    if (enableMLC){
+      data.io.read(w).bits  := dataReadArb.io.out.bits.req(w) // ?
+      val dataReadSetIdx = dataReadArb.io.out.bits.req(w).addr >> blockOffBits
+      val dataReadVptIdx = dataReadSetIdx >> (idxBits - vptIdxBits)
+      vpt.io.idx(2) := dataReadVptIdx
+      val dataReadNewIdx = Cat(vpt.io.cacheletID(2), dataReadSetIdx(idxBits-vptIdxBits-1, 0))
+      data.io.read(w).bits.addr  := Cat(dataReadNewIdx, dataReadArb.io.out.bits.req(w).addr(blockOffBits-1,0))
+      when (data.io.read(w).valid && (w == 0).B) {
+        printf(p"- Data Read -\n")
+        printf(p"\tBefore Remapping = ${dataReadArb.io.out.bits.req(w)}\n")
+        printf("\tdataReadSetIdx = 0b%b\n", dataReadSetIdx)
+        printf("\tdataReadVptIdx = 0b%b\n", dataReadVptIdx)
+        printf("\tdataReadNewSetIdx = 0b%b\n", dataReadNewIdx)
+        printf("\tdataReadAddr = 0b%b\n", data.io.read(w).bits.addr)
+        printf(p"\tAfter Remapping = ${data.io.read(w).bits}\n")
+      }
+    }
+    else{  
+      data.io.read(w).bits  := dataReadArb.io.out.bits.req(w)
+    }
   }
   dataReadArb.io.out.ready := true.B
 
   data.io.write.valid := dataWriteArb.io.out.fire
-  data.io.write.bits  := dataWriteArb.io.out.bits
+  if (enableMLC){
+    data.io.write.bits  := dataWriteArb.io.out.bits // ?
+    val dataWriteSetIdx = dataWriteArb.io.out.bits.addr >> blockOffBits
+    val dataWriteVptIdx = dataWriteSetIdx >> (idxBits - vptIdxBits)
+    vpt.io.idx(3) := dataWriteVptIdx
+    val dataWriteNewIdx = Cat(vpt.io.cacheletID(3), dataWriteSetIdx(idxBits-vptIdxBits-1, 0))
+    data.io.write.bits.addr  := Cat(dataWriteNewIdx, dataWriteArb.io.out.bits.addr(blockOffBits - 1, 0))
+    when (data.io.write.valid) {
+      printf(p"- Data Write -\n")
+      printf(p"\tBefore Remapping = ${dataWriteArb.io.out.bits }\n")
+      printf("\tdataWriteSetIdx = 0b%b\n", dataWriteSetIdx)
+      printf("\tdataWriteVptIdx = 0b%b\n", dataWriteVptIdx)
+      printf("\tdataWriteNewSetIdx = 0b%b\n", dataWriteNewIdx)
+      printf("\tdataWriteAddr = 0b%b\n",  data.io.write.bits.addr)
+      printf(p"\tAfter Remapping = ${data.io.write.bits}\n")
+    }
+  }
+  else{
+    data.io.write.bits  := dataWriteArb.io.out.bits
+  }
+  
   dataWriteArb.io.out.ready := true.B
 
   // ------------
@@ -479,7 +594,7 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
   io.lsu.req.ready := metaReadArb.io.in(4).ready && dataReadArb.io.in(2).ready
   metaReadArb.io.in(4).valid := io.lsu.req.valid
   dataReadArb.io.in(2).valid := io.lsu.req.valid
-  for (w <- 0 until memWidth) {
+  for (w <- 0 until memWidth) { 
     // Tag read for new requests
     metaReadArb.io.in(4).bits.req(w).idx    := io.lsu.req.bits(w).bits.addr >> blockOffBits
     metaReadArb.io.in(4).bits.req(w).way_en := DontCare
@@ -584,6 +699,10 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
                  Mux(prefetch_fire            , prefetch_req,
                  Mux(mshrs.io.meta_read.fire, mshr_read_req
                                               , replay_req)))))
+  //when (s0_valid(0)){
+  //  printf(p"s0_req = ${s0_req}\n")
+  //}
+
   val s0_type  = Mux(io.lsu.req.fire        , t_lsu,
                  Mux(wb_fire                  , t_wb,
                  Mux(prober_fire              , t_probe,
@@ -609,6 +728,27 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
   for (w <- 0 until memWidth)
     assert(!(io.lsu.s1_kill(w) && !RegNext(io.lsu.req.fire) && !RegNext(io.lsu.req.bits(w).valid)))
   val s1_addr         = s1_req.map(_.addr)
+  
+  //if (enableMLC){
+    val reqSetIdx = widthMap(i => s1_addr(i) >> blockOffBits)
+    val reqVptIdx = widthMap(i => reqSetIdx(i) >> (idxBits - vptIdxBits))
+    vpt.io.idx(4) := reqVptIdx(0)(vptIdxBits-1, 0)
+    val reqNewSetIdx = widthMap(i => Cat(vpt.io.cacheletID(4), reqSetIdx(i)(idxBits-vptIdxBits-1,0)))
+    val reqTag = widthMap(i => s1_addr(i) >> untagBits)
+    val s1_addr_remapped = widthMap(i => Cat(reqVptIdx(i)(vptIdxBits-1, 0), reqTag(i)(tagBits-1, 0), reqNewSetIdx(i), s1_addr(i)(blockOffBits-1,0)))
+
+    when (s1_valid(0)) {
+      printf(p"- Request - \n")
+      printf("\tBefore Remapping = 0b%b\n", s1_addr(0))
+      printf(p"\tuntagBits = ${untagBits} | tagBits = ${tagBits} | blockOffBits = ${blockOffBits}\n")
+      printf("\treqSetIdx = 0b%b\n", reqSetIdx(0))
+      printf("\treqTag = 0b%b\n", reqTag(0))
+      printf("\treqVptIdx = 0b%b\n", reqVptIdx(0))
+      printf("\treqNewSetIdx = 0b%b\n", reqNewSetIdx(0))
+      printf("\tAfter Remapping = 0b%b\n", s1_addr_remapped(0))
+    }
+  //}
+
   val s1_nack         = s1_addr.map(a => a(idxMSB,idxLSB) === prober.io.meta_write.bits.idx && !prober.io.req.ready)
   val s1_send_resp_or_nack = RegNext(s0_send_resp_or_nack)
   val s1_type         = RegNext(s0_type)
@@ -619,14 +759,21 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
 
   // tag check
   def wayMap[T <: Data](f: Int => T) = VecInit((0 until nWays).map(f))
-  val s1_tag_eq_way = widthMap(i => wayMap((w: Int) => meta(i).io.resp(w).tag === (s1_addr(i) >> untagBits)).asUInt)
+  val s1_tag_eq_way = widthMap(i => wayMap((w: Int) => meta(i).io.resp(w).tag === (s1_addr_remapped(i) >> untagBits)).asUInt)
   val s1_tag_match_way = widthMap(i =>
                          Mux(s1_type === t_replay, s1_replay_way_en,
                          Mux(s1_type === t_wb,     s1_wb_way_en,
                          Mux(s1_type === t_mshr_meta_read, s1_mshr_meta_read_way_en,
                            wayMap((w: Int) => s1_tag_eq_way(i)(w) && meta(i).io.resp(w).coh.isValid()).asUInt))))
 
-  val s1_wb_idx_matches = widthMap(i => (s1_addr(i)(untagBits-1,blockOffBits) === wb.io.idx.bits) && wb.io.idx.valid)
+  val s1_wb_idx_matches = widthMap(i => (s1_addr(i)(untagBits-1,blockOffBits) === wb.io.idx.bits) && wb.io.idx.valid) // may need remapped addr here?
+
+  when (s1_valid(0)) {
+    printf(p"- Tag Check - \n")
+    printf(p"\tmeta(0).io.resp = ${meta(0).io.resp}\n")
+    printf("\ts1_tag_eq_way = 0b%b\n", s1_tag_eq_way(0))
+    printf(p"\ts1_wb_idx_matches = ${s1_wb_idx_matches}\n")
+  }
 
   val s2_req   = RegNext(s1_req)
   val s2_type  = RegNext(s1_type)
@@ -661,7 +808,7 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
   val lrsc_addr  = Reg(UInt())
   val s2_lr = s2_req(0).uop.mem_cmd === M_XLR && (!RegNext(s1_nack(0)) || s2_type === t_replay)
   val s2_sc = s2_req(0).uop.mem_cmd === M_XSC && (!RegNext(s1_nack(0)) || s2_type === t_replay)
-  val s2_lrsc_addr_match = widthMap(w => lrsc_valid && lrsc_addr === (s2_req(w).addr >> blockOffBits))
+  val s2_lrsc_addr_match = widthMap(w => lrsc_valid && lrsc_addr === (s2_req(w).addr >> blockOffBits)) // might need remapped for this?
   val s2_sc_fail = s2_sc && !s2_lrsc_addr_match(0)
   when (lrsc_count > 0.U) { lrsc_count := lrsc_count - 1.U }
   when (s2_valid(0) && ((s2_type === t_lsu && s2_hit(0) && !s2_nack(0)) ||
@@ -713,8 +860,7 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
 
   // replacement policy
   val replacer = cacheParams.replacement
-  val s1_replaced_way_en = UIntToOH(replacer.way)
-  val s2_replaced_way_en = UIntToOH(RegNext(replacer.way))
+  val s2_replaced_way_en = UIntToOH(RegNext(replacer.way)) // <---- MODIFY REPLACER
   val s2_repl_meta = widthMap(i => Mux1H(s2_replaced_way_en, wayMap((w: Int) => RegNext(meta(i).io.resp(w))).toSeq))
 
   // nack because of incoming probe
