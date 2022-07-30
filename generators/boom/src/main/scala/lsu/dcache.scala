@@ -271,7 +271,7 @@ class VPT(implicit p: Parameters) extends BoomModule()(p)
   val io = IO(new BoomBundle {
     val idx        = Input(Vec(5, UInt(vptIdxBits.W))) //VPT index - comes from address
     val cacheletID = Output(Vec(5, UInt(vptIdxBits.W)))
-    val wayMask    = Output(UInt((nWays - cfg.numNonEnclaveWays).W))
+    val wayMask    = Output(Vec(2, UInt((nWays - cfg.numNonEnclaveWays).W)))
   })
 
   val cacheletIDArray = Reg(Vec(cfg.numVPTEntries, UInt(vptIdxBits.W)))
@@ -291,7 +291,7 @@ class VPT(implicit p: Parameters) extends BoomModule()(p)
   io.cacheletID(4) := cacheletIDArray(io.idx(4)) // remaps request?
 
   // haven't implemented the waymask yet
-  io.wayMask := wayMaskArray(io.idx(0))
+  io.wayMask(0) := wayMaskArray(io.idx(4))
 }
 
 abstract class AbstractBoomDataArray(implicit p: Parameters) extends BoomModule with HasL1HellaCacheParameters {
@@ -494,15 +494,15 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
       vpt.io.idx(0) := metaWriteVptIdx
       val metaWriteNewIdx = Cat(vpt.io.cacheletID(0), metaWriteArb.io.out.bits.idx(idxBits-vptIdxBits-1,0))
       meta(w).io.write.bits.idx := metaWriteNewIdx
-      meta(w).io.write.bits.data.tag  := Cat(metaWriteVptIdx(vptIdxBits-1,0), metaWriteArb.io.out.bits.data.tag)
-      meta(w).io.write.bits.tag := Cat(metaWriteVptIdx(vptIdxBits-1,0), metaWriteArb.io.out.bits.data.tag)
+      meta(w).io.write.bits.data.tag  := Cat(metaWriteVptIdx, metaWriteArb.io.out.bits.data.tag(tagBits-1, 0))
       when (meta(w).io.write.valid && (w == 0).B) {
         printf(p"- Meta Write -\n")
         printf(p"\tBefore Remapping = ${metaWriteArb.io.out.bits}\n")
-        printf("\tmetaWriteSetIdx = 0b%b\n", metaWriteArb.io.out.bits.idx)
+        printf("\tmetaWriteSetIdx = 0b%b\n", metaWriteArb.io.out.bits.idx(setBits-1,0))
         printf("\tmetaWriteVptIdx = 0b%b\n", metaWriteVptIdx)
         printf("\tmetaWriteNewSetIdx = 0b%b\n", metaWriteNewIdx)
-        printf("\tmetaWriteTag = 0b%b\n", meta(w).io.write.bits.data.tag)
+        printf("\tcatTag = 0b%b\n", Cat(metaWriteVptIdx, metaWriteArb.io.out.bits.data.tag))
+        printf("\tmetaWriteTag = 0b%b\n", meta(w).io.write.bits.data.tag(tagBits+vptIdxBits-1,0))
         printf(p"\tAfter Remapping = ${meta(w).io.write.bits}\n")
       }
 
@@ -516,10 +516,10 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
       when (meta(w).io.read.valid && (w == 0).B) {
         printf(p"- Meta Read -\n")
         printf(p"\tBefore Remapping = ${metaReadArb.io.out.bits.req(w)}\n")
-        printf("\tmetaReadSetIdx = 0b%b\n", metaReadArb.io.out.bits.req(w).idx)
+        printf("\tmetaReadSetIdx = 0b%b\n", metaReadArb.io.out.bits.req(w).idx(setBits-1,0))
         printf("\tmetaReadVptIdx = 0b%b\n", metaReadVptIdx)
         printf("\tmetaReadNewSetIdx = 0b%b\n", metaReadNewIdx)
-        printf("\tmetaReadTag = 0b%b\n", meta(w).io.read.bits.tag)
+        printf("\tmetaReadTag = 0b%b\n", meta(w).io.read.bits.tag(tagBits+vptIdxBits-1,0))
         printf(p"\tAfter Remapping = ${meta(w).io.read.bits}\n")
       }
     }
@@ -551,7 +551,7 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
       when (data.io.read(w).valid && (w == 0).B) {
         printf(p"- Data Read -\n")
         printf(p"\tBefore Remapping = ${dataReadArb.io.out.bits.req(w)}\n")
-        printf("\tdataReadSetIdx = 0b%b\n", dataReadSetIdx)
+        printf("\tdataReadSetIdx = 0b%b\n", dataReadSetIdx(setBits-1,0))
         printf("\tdataReadVptIdx = 0b%b\n", dataReadVptIdx)
         printf("\tdataReadNewSetIdx = 0b%b\n", dataReadNewIdx)
         printf("\tdataReadAddr = 0b%b\n", data.io.read(w).bits.addr)
@@ -575,8 +575,8 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
     when (data.io.write.valid) {
       printf(p"- Data Write -\n")
       printf(p"\tBefore Remapping = ${dataWriteArb.io.out.bits }\n")
-      printf("\tdataWriteSetIdx = 0b%b\n", dataWriteSetIdx)
-      printf("\tdataWriteVptIdx = 0b%b\n", dataWriteVptIdx)
+      printf("\tdataWriteSetIdx = 0b%b\n", dataWriteSetIdx(setBits-1,0))
+      printf("\tdataWriteVptIdx = 0b%b\n", dataWriteVptIdx(vptIdxBits-1,0))
       printf("\tdataWriteNewSetIdx = 0b%b\n", dataWriteNewIdx)
       printf("\tdataWriteAddr = 0b%b\n",  data.io.write.bits.addr)
       printf(p"\tAfter Remapping = ${data.io.write.bits}\n")
@@ -729,21 +729,20 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
     assert(!(io.lsu.s1_kill(w) && !RegNext(io.lsu.req.fire) && !RegNext(io.lsu.req.bits(w).valid)))
   val s1_addr         = s1_req.map(_.addr)
   
-  //if (enableMLC){
+  //if (enableMLC){ // this if statement doesn't work, will look for a solution at some point
     val reqSetIdx = widthMap(i => s1_addr(i) >> blockOffBits)
     val reqVptIdx = widthMap(i => reqSetIdx(i) >> (idxBits - vptIdxBits))
     vpt.io.idx(4) := reqVptIdx(0)(vptIdxBits-1, 0)
     val reqNewSetIdx = widthMap(i => Cat(vpt.io.cacheletID(4), reqSetIdx(i)(idxBits-vptIdxBits-1,0)))
     val reqTag = widthMap(i => s1_addr(i) >> untagBits)
-    val s1_addr_remapped = widthMap(i => Cat(reqVptIdx(i)(vptIdxBits-1, 0), reqTag(i)(tagBits-1, 0), reqNewSetIdx(i), s1_addr(i)(blockOffBits-1,0)))
-
+    val s1_addr_remapped = widthMap(i => Cat(reqVptIdx(i)(vptIdxBits-1, 0), reqTag(i)(tagBits-1,0), reqNewSetIdx(i), s1_addr(i)(blockOffBits-1,0)))
+    val s2_addr_remapped = RegNext(s1_addr_remapped)
     when (s1_valid(0)) {
       printf(p"- Request - \n")
-      printf("\tBefore Remapping = 0b%b\n", s1_addr(0))
-      printf(p"\tuntagBits = ${untagBits} | tagBits = ${tagBits} | blockOffBits = ${blockOffBits}\n")
-      printf("\treqSetIdx = 0b%b\n", reqSetIdx(0))
-      printf("\treqTag = 0b%b\n", reqTag(0))
-      printf("\treqVptIdx = 0b%b\n", reqVptIdx(0))
+      printf("\tBefore Remapping = 0b%b\n", s1_addr(0)(coreMaxAddrBits-1,0))
+      printf("\treqSetIdx = 0b%b\n", reqSetIdx(0)(setBits-1,0))
+      printf("\treqTag = 0b%b\n", reqTag(0)(tagBits-1,0))
+      printf("\treqVptIdx = 0b%b\n", reqVptIdx(0)(vptIdxBits-1,0))
       printf("\treqNewSetIdx = 0b%b\n", reqNewSetIdx(0))
       printf("\tAfter Remapping = 0b%b\n", s1_addr_remapped(0))
     }
@@ -808,14 +807,16 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
   val lrsc_addr  = Reg(UInt())
   val s2_lr = s2_req(0).uop.mem_cmd === M_XLR && (!RegNext(s1_nack(0)) || s2_type === t_replay)
   val s2_sc = s2_req(0).uop.mem_cmd === M_XSC && (!RegNext(s1_nack(0)) || s2_type === t_replay)
-  val s2_lrsc_addr_match = widthMap(w => lrsc_valid && lrsc_addr === (s2_req(w).addr >> blockOffBits)) // might need remapped for this?
+  //val s2_lrsc_addr_match = widthMap(w => lrsc_valid && lrsc_addr === (s2_req(w).addr >> blockOffBits)) // might need remapped for this?
+  val s2_lrsc_addr_match = widthMap(w => lrsc_valid && lrsc_addr === (s2_addr_remapped(w) >> blockOffBits))
   val s2_sc_fail = s2_sc && !s2_lrsc_addr_match(0)
   when (lrsc_count > 0.U) { lrsc_count := lrsc_count - 1.U }
   when (s2_valid(0) && ((s2_type === t_lsu && s2_hit(0) && !s2_nack(0)) ||
                      (s2_type === t_replay && s2_req(0).uop.mem_cmd =/= M_FLUSH_ALL))) {
     when (s2_lr) {
       lrsc_count := (lrscCycles - 1).U
-      lrsc_addr := s2_req(0).addr >> blockOffBits
+      // lrsc_addr := s2_req(0).addr >> blockOffBits
+      lrsc_addr := s2_addr_remapped(0) >> blockOffBits
     }
     when (lrsc_count > 0.U) {
       lrsc_count := 0.U
@@ -833,7 +834,8 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
   }
 
   when (s2_valid(0)) {
-    when (s2_req(0).addr === debug_sc_fail_addr) {
+    //when (s2_req(0).addr === debug_sc_fail_addr) { // 
+    when (s2_addr_remapped(0) === debug_sc_fail_addr) { 
       when (s2_sc_fail) {
         debug_sc_fail_cnt := debug_sc_fail_cnt + 1.U
       } .elsewhen (s2_sc) {
@@ -841,7 +843,8 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
       }
     } .otherwise {
       when (s2_sc_fail) {
-        debug_sc_fail_addr := s2_req(0).addr
+        //debug_sc_fail_addr := s2_req(0).addr
+        debug_sc_fail_addr := s2_addr_remapped(0)
         debug_sc_fail_cnt  := 1.U
       }
     }
@@ -856,7 +859,8 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
   }
 
   val s2_data_muxed = widthMap(w => Mux1H(s2_tag_match_way(w), s2_data(w)))
-  val s2_word_idx   = widthMap(w => if (rowWords == 1) 0.U else s2_req(w).addr(log2Up(rowWords*wordBytes)-1, log2Up(wordBytes)))
+  // val s2_word_idx   = widthMap(w => if (rowWords == 1) 0.U else s2_req(w).addr(log2Up(rowWords*wordBytes)-1, log2Up(wordBytes)))
+  val s2_word_idx   = widthMap(w => if (rowWords == 1) 0.U else s2_addr_remapped(w)(log2Up(rowWords*wordBytes)-1, log2Up(wordBytes)))
 
   // replacement policy
   val replacer = cacheParams.replacement
@@ -970,10 +974,17 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
   val s2_data_word_prebypass = widthMap(w => s2_data_muxed(w) >> Cat(s2_word_idx(w), 0.U(log2Ceil(coreDataBits).W)))
   val s2_data_word = Wire(Vec(memWidth, UInt()))
 
+  /* 
   val loadgen = (0 until memWidth).map { w =>
     new LoadGen(s2_req(w).uop.mem_size, s2_req(w).uop.mem_signed, s2_req(w).addr,
                 s2_data_word(w), s2_sc && (w == 0).B, wordBytes)
+  }*/
+
+  val loadgen = (0 until memWidth).map { w =>
+    new LoadGen(s2_req(w).uop.mem_size, s2_req(w).uop.mem_signed, s2_addr_remapped(w),
+                s2_data_word(w), s2_sc && (w == 0).B, wordBytes)
   }
+
   // Mux between cache responses and uncache responses
   val cache_resp   = Wire(Vec(memWidth, Valid(new BoomDCacheResp)))
   for (w <- 0 until memWidth) {
@@ -1027,9 +1038,17 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
   val s5_req   = RegNext(s4_req)
   val s5_valid = RegNext(s4_valid)
 
-  val s3_bypass = widthMap(w => s3_valid && ((s2_req(w).addr >> wordOffBits) === (s3_req.addr >> wordOffBits)))
-  val s4_bypass = widthMap(w => s4_valid && ((s2_req(w).addr >> wordOffBits) === (s4_req.addr >> wordOffBits)))
-  val s5_bypass = widthMap(w => s5_valid && ((s2_req(w).addr >> wordOffBits) === (s5_req.addr >> wordOffBits)))
+  val s3_addr_remapped = RegNext(s2_addr_remapped)
+  val s4_addr_remapped = RegNext(s3_addr_remapped)
+  val s5_addr_remapped = RegNext(s4_addr_remapped)
+
+  // val s3_bypass = widthMap(w => s3_valid && ((s2_req(w).addr >> wordOffBits) === (s3_req.addr >> wordOffBits))) // really don't know if this should be changed
+  // val s4_bypass = widthMap(w => s4_valid && ((s2_req(w).addr >> wordOffBits) === (s4_req.addr >> wordOffBits)))
+  // val s5_bypass = widthMap(w => s5_valid && ((s2_req(w).addr >> wordOffBits) === (s5_req.addr >> wordOffBits)))
+
+  val s3_bypass = widthMap(w => s3_valid && ((s2_addr_remapped(w) >> wordOffBits) === (s3_addr_remapped(0) >> wordOffBits)))
+  val s4_bypass = widthMap(w => s4_valid && ((s2_addr_remapped(w) >> wordOffBits) === (s4_addr_remapped(0) >> wordOffBits)))
+  val s5_bypass = widthMap(w => s5_valid && ((s2_addr_remapped(w) >> wordOffBits) === (s5_addr_remapped(0) >> wordOffBits)))
 
   // Store -> Load bypassing
   for (w <- 0 until memWidth) {
@@ -1039,7 +1058,8 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
                                          s2_data_word_prebypass(w))))
   }
   val amoalu   = Module(new AMOALU(xLen))
-  amoalu.io.mask := new StoreGen(s2_req(0).uop.mem_size, s2_req(0).addr, 0.U, xLen/8).mask
+  // amoalu.io.mask := new StoreGen(s2_req(0).uop.mem_size, s2_req(0).addr, 0.U, xLen/8).mask
+  amoalu.io.mask := new StoreGen(s2_req(0).uop.mem_size, s2_addr_remapped(0), 0.U, xLen/8).mask
   amoalu.io.cmd  := s2_req(0).uop.mem_cmd
   amoalu.io.lhs  := s2_data_word(0)
   amoalu.io.rhs  := s2_req(0).data

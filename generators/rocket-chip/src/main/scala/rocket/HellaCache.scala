@@ -19,7 +19,7 @@ case class DCacheParams(
     nWays: Int = 4,
     rowBits: Int = 64,
     subWordBits: Option[Int] = None,
-    replacementPolicy: String = "random",
+    replacementPolicy: String = "ccplru",
     nTLBSets: Int = 1,
     nTLBWays: Int = 32,
     nTLBBasePageSectors: Int = 4,
@@ -65,6 +65,7 @@ trait HasL1HellaCacheParameters extends HasL1CacheParameters with HasCoreParamet
   val cfg = cacheParams
   /* start: MLC */
   def vptIdxBits = log2Up(cfg.numVPTEntries)
+  def setBits = log2Up(cfg.nSets)
   /* end: MLC */
   def wordBits = coreDataBits
   def wordBytes = coreDataBytes
@@ -335,8 +336,7 @@ class L1MetadataArray[T <: L1Metadata](onReset: () => T)(implicit p: Parameters)
   when (wen) {
     tag_array.write(waddr, Vec.fill(nWays)(wdata), wmask)
   }
-  io.resp := tag_array.read(io.read.bits.idx, io.read.fire()).map(rstVal.fromBits(_))
-
+  io.resp := tag_array.read(io.read.bits.idx, io.read.fire).map(rstVal.fromBits(_))
   io.read.ready := !wen // so really this could be a 6T RAM
   io.write.ready := !rst
 }
