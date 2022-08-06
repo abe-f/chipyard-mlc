@@ -7,6 +7,7 @@ import chisel3._
 import chisel3.util._
 import chisel3.util.random.LFSR
 import freechips.rocketchip.util.property.cover
+// import freechips.rocketchip.config.Parameters
 
 abstract class ReplacementPolicy {
   def nBits: Int
@@ -140,7 +141,6 @@ class TrueLRU(n_ways: Int) extends ReplacementPolicy {
   @deprecated("replace 'replace' with 'way' from abstract class ReplacementPolicy","Rocket Chip 2020.05")
   def replace: UInt = way
 }
-
 
 class PseudoLRU(n_ways: Int) extends ReplacementPolicy {
   // Pseudo-LRU tree algorithm: https://en.wikipedia.org/wiki/Pseudo-LRU#Tree-PLRU
@@ -282,6 +282,8 @@ class CCPseudoLRU(n_ways: Int) extends ReplacementPolicy {
   def perSet = true
   private val state_reg = if (nBits == 0) Reg(UInt(0.W)) else RegInit(0.U(nBits.W))
   def state_read = WireDefault(state_reg)
+
+  // val wayMask = Wire(UInt(n_ways.W))
 
   def access(touch_way: UInt): Unit = {
     state_reg := get_next_state(state_reg, touch_way)

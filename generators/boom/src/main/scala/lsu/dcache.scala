@@ -271,7 +271,7 @@ class VPT(implicit p: Parameters) extends BoomModule()(p)
   val io = IO(new BoomBundle {
     val idx        = Input(Vec(5, UInt(vptIdxBits.W))) //VPT index - comes from address
     val cacheletID = Output(Vec(5, UInt(vptIdxBits.W)))
-    val wayMask    = Output(Vec(2, UInt((nWays - cfg.numNonEnclaveWays).W)))
+    val wayMask    = Output(Vec(3, UInt((nWays - cfg.numNonEnclaveWays).W)))
   })
 
   val cacheletIDArray = Reg(Vec(cfg.numVPTEntries, UInt(vptIdxBits.W)))
@@ -291,7 +291,9 @@ class VPT(implicit p: Parameters) extends BoomModule()(p)
   io.cacheletID(4) := cacheletIDArray(io.idx(4)) // remaps request?
 
   // haven't implemented the waymask yet
-  io.wayMask(0) := wayMaskArray(io.idx(4))
+  io.wayMask(0) := wayMaskArray(io.idx(0))
+  io.wayMask(1) := wayMaskArray(io.idx(1))
+  io.wayMask(2) := wayMaskArray(io.idx(4))
 }
 
 abstract class AbstractBoomDataArray(implicit p: Parameters) extends BoomModule with HasL1HellaCacheParameters {
@@ -465,6 +467,7 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
 
   printf(p"--------- New Cycle --------\n")
   //dontTouch(vpt)
+  // dontTouch()
 
   val wb = Module(new BoomWritebackUnit)
   val prober = Module(new BoomProbeUnit)
@@ -478,6 +481,7 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
   // tags
   def onReset = L1Metadata(0.U, ClientMetadata.onReset)
   val meta = Seq.fill(memWidth) { Module(new L1MetadataArray(onReset _)) }
+ 
   val metaWriteArb = Module(new Arbiter(new L1MetaWriteReq, 2))
   // 0 goes to MSHR refills, 1 goes to prober
   val metaReadArb = Module(new Arbiter(new BoomL1MetaReadReq, 6))
@@ -486,6 +490,9 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
 
   metaReadArb.io.in := DontCare
   for (w <- 0 until memWidth) {
+    meta(w).io.wayMask := vpt.io.wayMask(0)
+    meta(w).io.enclaveMode := 1.U
+
     meta(w).io.write.valid := metaWriteArb.io.out.fire
     meta(w).io.read.valid  := metaReadArb.io.out.valid
     if (enableMLC){
@@ -864,6 +871,7 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
 
   // replacement policy
   val replacer = cacheParams.replacement
+  // replacer.wayMask := RegNext(vpt.io.wayMask(2))
   val s2_replaced_way_en = UIntToOH(RegNext(replacer.way)) // <---- MODIFY REPLACER
   val s2_repl_meta = widthMap(i => Mux1H(s2_replaced_way_en, wayMap((w: Int) => RegNext(meta(i).io.resp(w))).toSeq))
 

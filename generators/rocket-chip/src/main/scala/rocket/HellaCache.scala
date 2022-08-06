@@ -321,6 +321,9 @@ class L1MetadataArray[T <: L1Metadata](onReset: () => T)(implicit p: Parameters)
     val read = Decoupled(new L1MetaReadReq).flip
     val write = Decoupled(new L1MetaWriteReq).flip
     val resp = Vec(nWays, rstVal.cloneType).asOutput
+
+    val enclaveMode = Input(UInt(width = 1))
+    val wayMask = Input(UInt(width = nWays - cfg.numNonEnclaveWays))
   }
   val rst_cnt = Reg(init=UInt(0, log2Up(nSets+1)))
   val rst = rst_cnt < UInt(nSets)
@@ -331,12 +334,38 @@ class L1MetadataArray[T <: L1Metadata](onReset: () => T)(implicit p: Parameters)
   when (rst) { rst_cnt := rst_cnt+UInt(1) }
 
   val metabits = rstVal.getWidth
-  val tag_array = SeqMem(nSets, Vec(nWays, UInt(width = metabits + vptIdxBits)))
-  val wen = rst || io.write.valid
-  when (wen) {
-    tag_array.write(waddr, Vec.fill(nWays)(wdata), wmask)
+  // val tag_array = SeqMem(nSets, Vec(nWays, UInt(width = metabits + vptIdxBits)))
+
+  // 3 Cases: MLC not enabled, all ways are enclave, or MLC enabled and numNonEnclaveWays > 0
+  if (!cfg.enableMLC){
+    val tag_array = SeqMem(nSets, Vec(nWays, UInt(width = metabits)))
+    val wen = rst || io.write.valid
+    when (wen) {
+      tag_array.write(waddr, Vec.fill(nWays)(wdata), wmask)
+    }
+    io.resp := tag_array.read(io.read.bits.idx, io.read.fire).map(rstVal.fromBits(_))
+    io.read.ready := !wen // so really this could be a 6T RAM
+    io.write.ready := !rst
   }
-  io.resp := tag_array.read(io.read.bits.idx, io.read.fire).map(rstVal.fromBits(_))
-  io.read.ready := !wen // so really this could be a 6T RAM
-  io.write.ready := !rst
+  else if (cfg.numNonEnclaveWays == 0){
+    val tag_array_enclave = SeqMem(nSets, Vec(nWays, UInt(width = metabits + vptIdxBits)))
+    val wen = (rst || io.write.valid)
+
+    // logical AND of the masks 
+    val mlc_wmask = (Mux(rst || Bool(nWays == 1), SInt(-1), io.write.bits.way_en.asSInt) & io.wayMask.asSInt).asBools
+    // rmask is unused for the normal design. might need to figure out something for this
+    val mlc_rmask = (Mux(rst || Bool(nWays == 1), SInt(-1), io.read.bits.way_en.asSInt) & io.wayMask.asSInt).asBools 
+
+    when (wen) {
+      tag_array_enclave.write(waddr, Vec.fill(nWays)(wdata), mlc_wmask)
+    }
+    io.resp := tag_array_enclave.read(io.read.bits.idx, io.read.fire).map(rstVal.fromBits(_)) // no read mask..
+    io.read.ready := !wen // so really this could be a 6T RAM
+    io.write.ready := !rst
+  }
+  else{ // there's enclave and non enclave ways
+    val tag_array_enclave = SeqMem(nSets, Vec(nWays - cfg.numNonEnclaveWays, UInt(width = metabits + vptIdxBits)))
+    val tag_array_nonenclave = SeqMem(nSets, Vec(nWays, UInt(width = metabits)))
+    // not implemented yet
+  }
 }
