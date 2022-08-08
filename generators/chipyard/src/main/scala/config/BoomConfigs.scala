@@ -6,6 +6,10 @@ import freechips.rocketchip.config.{Config}
 // BOOM Configs
 // ---------------------
 
+class MLCBoomConfig(numVPTEntries: Int = 2) extends Config(
+  new boom.common.WithNMLCBooms(numVPTEntries, 1) ++                         // medium boom config
+  new chipyard.config.AbstractConfig)
+
 class SmallBoomConfig extends Config(
   new boom.common.WithNSmallBooms(1) ++                          // small boom config
   new chipyard.config.AbstractConfig)

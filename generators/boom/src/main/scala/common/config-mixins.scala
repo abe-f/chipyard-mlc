@@ -80,6 +80,54 @@ class WithRationalBoomTiles extends Config((site, here, up) => {
 })
 
 /**
+ * 2-wide BOOM.
+ */
+class WithNMLCBooms(numVPTEntries: Int = 2, n: Int = 1, overrideIdOffset: Option[Int] = None) extends Config(
+  new WithTAGELBPD ++ // Default to TAGE-L BPD
+  new Config((site, here, up) => {
+    case TilesLocated(InSubsystem) => {
+      val prev = up(TilesLocated(InSubsystem), site)
+      val idOffset = overrideIdOffset.getOrElse(prev.size)
+      (0 until n).map { i =>
+        BoomTileAttachParams(
+          tileParams = BoomTileParams(
+            core = BoomCoreParams(
+              fetchWidth = 4,
+              decodeWidth = 2,
+              numRobEntries = 64,
+              issueParams = Seq(
+                IssueParams(issueWidth=1, numEntries=12, iqType=IQT_MEM.litValue, dispatchWidth=2),
+                IssueParams(issueWidth=2, numEntries=20, iqType=IQT_INT.litValue, dispatchWidth=2),
+                IssueParams(issueWidth=1, numEntries=16, iqType=IQT_FP.litValue , dispatchWidth=2)),
+              numIntPhysRegisters = 80,
+              numFpPhysRegisters = 64,
+              numLdqEntries = 16,
+              numStqEntries = 16,
+              maxBrCount = 12,
+              numFetchBufferEntries = 16,
+              ftq = FtqParameters(nEntries=32),
+              nPerfCounters = 6,
+              fpu = Some(freechips.rocketchip.tile.FPUParams(sfmaLatency=4, dfmaLatency=4, divSqrt=true))
+            ),
+            dcache = Some(
+              // DCacheParams(rowBits = site(SystemBusKey).beatBits, nSets=64, nWays=4, nMSHRs=2, nTLBWays=8)
+              DCacheParams(rowBits = site(SystemBusKey).beatBits, nSets=256, nWays=8, nMSHRs=4, nTLBWays=8, numVPTEntries = numVPTEntries)
+            ),
+            icache = Some(
+              ICacheParams(rowBits = site(SystemBusKey).beatBits, nSets=64, nWays=16, fetchBytes=2*4)
+            ),
+            hartId = i + idOffset
+          ),
+          crossingParams = RocketCrossingParams()
+        )
+      } ++ prev
+    }
+    case SystemBusKey => up(SystemBusKey, site).copy(beatBytes = 8)
+    case XLen => 64
+  })
+)
+
+/**
  * 1-wide BOOM.
  */
 class WithNSmallBooms(n: Int = 1, overrideIdOffset: Option[Int] = None) extends Config(
@@ -110,7 +158,8 @@ class WithNSmallBooms(n: Int = 1, overrideIdOffset: Option[Int] = None) extends 
               fpu = Some(freechips.rocketchip.tile.FPUParams(sfmaLatency=4, dfmaLatency=4, divSqrt=true))
             ),
             dcache = Some(
-              DCacheParams(rowBits = site(SystemBusKey).beatBits, nSets=64, nWays=4, nMSHRs=2, nTLBWays=8)
+              //DCacheParams(rowBits = site(SystemBusKey).beatBits, nSets=64, nWays=4, nMSHRs=2, nTLBWays=8)
+              DCacheParams(rowBits = site(SystemBusKey).beatBits, nSets=64, nWays=8, nMSHRs=2, nTLBWays=8, numVPTEntries=128)
             ),
             icache = Some(
               ICacheParams(rowBits = site(SystemBusKey).beatBits, nSets=64, nWays=4, fetchBytes=2*4)
@@ -157,7 +206,8 @@ class WithNMediumBooms(n: Int = 1, overrideIdOffset: Option[Int] = None) extends
               fpu = Some(freechips.rocketchip.tile.FPUParams(sfmaLatency=4, dfmaLatency=4, divSqrt=true))
             ),
             dcache = Some(
-              DCacheParams(rowBits = site(SystemBusKey).beatBits, nSets=64, nWays=4, nMSHRs=2, nTLBWays=8)
+              // DCacheParams(rowBits = site(SystemBusKey).beatBits, nSets=64, nWays=4, nMSHRs=2, nTLBWays=8)
+              DCacheParams(rowBits = site(SystemBusKey).beatBits, nSets=128, nWays=4, nMSHRs=4, nTLBWays=8)
             ),
             icache = Some(
               ICacheParams(rowBits = site(SystemBusKey).beatBits, nSets=64, nWays=4, fetchBytes=2*4)
@@ -203,7 +253,8 @@ class WithNLargeBooms(n: Int = 1, overrideIdOffset: Option[Int] = None) extends 
               fpu = Some(freechips.rocketchip.tile.FPUParams(sfmaLatency=4, dfmaLatency=4, divSqrt=true))
             ),
             dcache = Some(
-              DCacheParams(rowBits = site(SystemBusKey).beatBits, nSets=64, nWays=8, nMSHRs=4, nTLBWays=16)
+              // DCacheParams(rowBits = site(SystemBusKey).beatBits, nSets=64, nWays=8, nMSHRs=4, nTLBWays=16)
+              DCacheParams(rowBits = site(SystemBusKey).beatBits, nSets=128, nWays=8, nMSHRs=4, nTLBWays=16, numVPTEntries=64)
             ),
             icache = Some(
               ICacheParams(rowBits = site(SystemBusKey).beatBits, nSets=64, nWays=8, fetchBytes=4*4)

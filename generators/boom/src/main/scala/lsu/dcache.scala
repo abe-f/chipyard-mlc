@@ -8,6 +8,7 @@ package boom.lsu
 
 import chisel3._
 import chisel3.util._
+import chisel3.util.random.LFSR
 
 import freechips.rocketchip.config.Parameters
 import freechips.rocketchip.diplomacy._
@@ -264,36 +265,66 @@ class BoomL1DataReadReq(implicit p: Parameters) extends BoomBundle()(p) {
   val valid = Vec(memWidth, Bool())
 }
 
-class VPT(implicit p: Parameters) extends BoomModule()(p) 
+class MLC(implicit p: Parameters) extends BoomModule()(p) 
   with HasL1HellaCacheParameters
   with HasBoomCoreParameters
 {
   val io = IO(new BoomBundle {
+    val enclaveMode = Input(Bool())
     val idx        = Input(Vec(5, UInt(vptIdxBits.W))) //VPT index - comes from address
     val cacheletID = Output(Vec(5, UInt(vptIdxBits.W)))
     val wayMask    = Output(Vec(3, UInt((nWays - cfg.numNonEnclaveWays).W)))
   })
 
-  val cacheletIDArray = Reg(Vec(cfg.numVPTEntries, UInt(vptIdxBits.W)))
-  val wayMaskArray = Reg(Vec(cfg.numVPTEntries, UInt((nWays - cfg.numNonEnclaveWays).W)))
+  val vptCacheletIDArray = Reg(Vec(cfg.numVPTEntries, UInt(vptIdxBits.W)))
+  val vptWayMaskArray = Reg(Vec(cfg.numVPTEntries, UInt((nWays - cfg.numNonEnclaveWays).W)))
+  // dontTouch(vptCacheletIDArray) // these don't do anything
+  // dontTouch(vptWayMaskArray)
+
+  // since we are modelling a static VPT, we have to do some hacky stuff to make it so the new hardware
+  // doesn't get optimized out. instead of counters, we can just use LFSRs to load pseudo random values
+  // into a random VPT entry. With our short test programs, the trigger will never be reached.
+  val lfsr = LFSR(32)
+  val lfsrWayMask = LFSR(nWays - cfg.numNonEnclaveWays)
+  // there's no support for LFSR with width 1...
+  val lfsrCacheletID = RegInit(0.U(vptIdxBits.W))
+  val lfsrIdx = RegInit(0.U(vptIdxBits.W))
+  if (vptIdxBits == 1){
+    // val lfsrCacheletID = RegInit(0.U(1.W))
+    lfsrCacheletID := ~lfsrCacheletID
+    // val lfsrIdx = RegInit(0.U(1.W))
+    lfsrIdx := ~lfsrIdx
+  }
+  else {
+    // val lfsrCacheletID = LFSR(vptIdxBits)
+    lfsrCacheletID := LFSR(vptIdxBits)
+    // val lfsrIdx = LFSR(vptIdxBits)
+    lfsrIdx := LFSR(vptIdxBits)
+  }
   
-  for (i <- 0 to cfg.numVPTEntries - 1) {
-    // assign the cacheletIDs in reverse order
-    cacheletIDArray(i) := (cfg.numVPTEntries - 1 - i).U(vptIdxBits.W) 
-    wayMaskArray(i) := ~0.U((nWays - cfg.numNonEnclaveWays).W) // make wayMask all 1s
+  when(lfsr === ~0.U(32.W)) { 
+    vptCacheletIDArray(lfsrIdx) := lfsrCacheletID
+    vptWayMaskArray(lfsrIdx) := lfsrWayMask
+  }
+  .otherwise{
+    for (i <- 0 to cfg.numVPTEntries - 1) {
+      // assign the cacheletIDs in reverse order
+      vptCacheletIDArray(i) := (cfg.numVPTEntries - 1 - i).U(vptIdxBits.W) 
+      vptWayMaskArray(i) := ~0.U((nWays - cfg.numNonEnclaveWays).W) // make wayMask all 1s
+    }
   }
 
   // could always switch this to a map, easier to read like this for now though 
-  io.cacheletID(0) := cacheletIDArray(io.idx(0)) // remaps meta write
-  io.cacheletID(1) := cacheletIDArray(io.idx(1)) // remaps meta read
-  io.cacheletID(2) := cacheletIDArray(io.idx(2)) // remaps data write
-  io.cacheletID(3) := cacheletIDArray(io.idx(3)) // remaps data read
-  io.cacheletID(4) := cacheletIDArray(io.idx(4)) // remaps request?
+  io.cacheletID(0) := vptCacheletIDArray(io.idx(0)) // remaps meta write
+  io.cacheletID(1) := vptCacheletIDArray(io.idx(1)) // remaps meta read
+  io.cacheletID(2) := vptCacheletIDArray(io.idx(2)) // remaps data write
+  io.cacheletID(3) := vptCacheletIDArray(io.idx(3)) // remaps data read
+  io.cacheletID(4) := vptCacheletIDArray(io.idx(4)) // remaps request?
 
   // haven't implemented the waymask yet
-  io.wayMask(0) := wayMaskArray(io.idx(0))
-  io.wayMask(1) := wayMaskArray(io.idx(1))
-  io.wayMask(2) := wayMaskArray(io.idx(4))
+  io.wayMask(0) := vptWayMaskArray(io.idx(0))
+  io.wayMask(1) := vptWayMaskArray(io.idx(1))
+  io.wayMask(2) := vptWayMaskArray(io.idx(4))
 }
 
 abstract class AbstractBoomDataArray(implicit p: Parameters) extends BoomModule with HasL1HellaCacheParameters {
@@ -459,11 +490,12 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
 
   val t_replay :: t_probe :: t_wb :: t_mshr_meta_read :: t_lsu :: t_prefetch :: Nil = Enum(6)
 
-  val vpt = Module(new VPT)
+  val vpt = Module(new MLC)
   vpt.io := DontCare
   val enableMLC = cfg.enableMLC
   val numVPTEntries = cfg.numVPTEntries
   val numNonEnclaveWays = cfg.numNonEnclaveWays
+  // val idxBits = cfg.idxBits
 
   printf(p"--------- New Cycle --------\n")
   //dontTouch(vpt)
@@ -496,7 +528,7 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
     meta(w).io.write.valid := metaWriteArb.io.out.fire
     meta(w).io.read.valid  := metaReadArb.io.out.valid
     if (enableMLC){
-      meta(w).io.write.bits  := metaWriteArb.io.out.bits // ?
+      meta(w).io.write.bits  := metaWriteArb.io.out.bits
       val metaWriteVptIdx = metaWriteArb.io.out.bits.idx >> (idxBits - vptIdxBits) // upper bits of set index
       vpt.io.idx(0) := metaWriteVptIdx
       val metaWriteNewIdx = Cat(vpt.io.cacheletID(0), metaWriteArb.io.out.bits.idx(idxBits-vptIdxBits-1,0))
@@ -513,7 +545,7 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
         printf(p"\tAfter Remapping = ${meta(w).io.write.bits}\n")
       }
 
-      meta(w).io.read.bits   := metaReadArb.io.out.bits.req(w) // ?
+      meta(w).io.read.bits   := metaReadArb.io.out.bits.req(w)
       val metaReadVptIdx = metaReadArb.io.out.bits.req(w).idx >> (idxBits - vptIdxBits) // upper bits of set index
       vpt.io.idx(1) := metaReadVptIdx
       val metaReadNewIdx = Cat(vpt.io.cacheletID(1), metaReadArb.io.out.bits.req(w).idx(idxBits-vptIdxBits-1, 0))
@@ -871,7 +903,7 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
 
   // replacement policy
   val replacer = cacheParams.replacement
-  // replacer.wayMask := RegNext(vpt.io.wayMask(2))
+  replacer.wayMask := RegNext(vpt.io.wayMask(2))
   val s2_replaced_way_en = UIntToOH(RegNext(replacer.way)) // <---- MODIFY REPLACER
   val s2_repl_meta = widthMap(i => Mux1H(s2_replaced_way_en, wayMap((w: Int) => RegNext(meta(i).io.resp(w))).toSeq))
 

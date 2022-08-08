@@ -40,6 +40,7 @@ case class DCacheParams(
     enableMLC: Boolean = true,
     numVPTEntries: Int = 4,
     numNonEnclaveWays: Int = 0,
+    numVPTs: Int = 2,
     /* end: MLC */
     scratch: Option[BigInt] = None) extends L1CacheParams {
 
@@ -48,7 +49,8 @@ case class DCacheParams(
 
   def dataScratchpadBytes: Int = scratch.map(_ => nSets*blockBytes).getOrElse(0)
 
-  def replacement = new RandomReplacement(nWays)
+  // def replacement = new RandomReplacement(nWays)
+  def replacement = new CCPseudoLRU(nWays)
 
   def silentDrop: Boolean = !acquireBeforeRelease
 

@@ -283,7 +283,7 @@ class CCPseudoLRU(n_ways: Int) extends ReplacementPolicy {
   private val state_reg = if (nBits == 0) Reg(UInt(0.W)) else RegInit(0.U(nBits.W))
   def state_read = WireDefault(state_reg)
 
-  // val wayMask = Wire(UInt(n_ways.W))
+  val wayMask = Wire(UInt(n_ways.W))
 
   def access(touch_way: UInt): Unit = {
     state_reg := get_next_state(state_reg, touch_way)
