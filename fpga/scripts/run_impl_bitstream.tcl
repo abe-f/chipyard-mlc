@@ -52,6 +52,7 @@ report_cdc -details -file [file join $rptdir post_route_cdc.rpt]
 report_clock_interaction -file [file join $rptdir post_route_clock_interaction.rpt]
 report_bus_skew -file [file join $rptdir post_route_bus_skew.rpt]
 report_design_analysis -logic_level_distribution -of_timing_paths [get_timing_paths -max_paths 1000 -slack_lesser_than 0] -file [file join $rptdir post_route_timing_violations.rpt]
+report_power -hier -file [file join $rptdir power.rpt]
 
 # bitstream
 write_verilog -force [file join $wrkdir post_route.v]

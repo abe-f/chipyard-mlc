@@ -265,25 +265,126 @@ class BoomL1DataReadReq(implicit p: Parameters) extends BoomBundle()(p) {
   val valid = Vec(memWidth, Bool())
 }
 
-class MLC(implicit p: Parameters) extends BoomModule()(p) 
+class VPT(implicit p: Parameters) extends BoomModule()(p)
   with HasL1HellaCacheParameters
   with HasBoomCoreParameters
 {
   val io = IO(new BoomBundle {
-    val enclaveMode = Input(Bool())
-    val idx        = Input(Vec(5, UInt(vptIdxBits.W))) //VPT index - comes from address
+    val idx        = Input(Vec(5, UInt(vptIdxBits.W)))
     val cacheletID = Output(Vec(5, UInt(vptIdxBits.W)))
     val wayMask    = Output(Vec(3, UInt((nWays - cfg.numNonEnclaveWays).W)))
   })
 
   val vptCacheletIDArray = Reg(Vec(cfg.numVPTEntries, UInt(vptIdxBits.W)))
   val vptWayMaskArray = Reg(Vec(cfg.numVPTEntries, UInt((nWays - cfg.numNonEnclaveWays).W)))
-  // dontTouch(vptCacheletIDArray) // these don't do anything
-  // dontTouch(vptWayMaskArray)
 
-  // since we are modelling a static VPT, we have to do some hacky stuff to make it so the new hardware
-  // doesn't get optimized out. instead of counters, we can just use LFSRs to load pseudo random values
-  // into a random VPT entry. With our short test programs, the trigger will never be reached.
+  val lfsr = LFSR(23)
+  val lfsrWayMask = LFSR(nWays - cfg.numNonEnclaveWays)
+  val lfsrCacheletID = RegInit(0.U(vptIdxBits.W))
+  val lfsrIdx = RegInit(0.U(vptIdxBits.W))
+  if (vptIdxBits == 1){
+    lfsrCacheletID := ~lfsrCacheletID
+    lfsrIdx := ~lfsrIdx
+  }
+  else {
+    lfsrCacheletID := LFSR(vptIdxBits)
+    lfsrIdx := LFSR(vptIdxBits)
+  }
+
+  when(lfsr === ~0.U(23.W)) { 
+    vptCacheletIDArray(lfsrIdx) := lfsrCacheletID
+    vptWayMaskArray(lfsrIdx) := lfsrWayMask
+  }
+  .otherwise {
+    for (i <- 0 to cfg.numVPTEntries - 1) {
+      // assign the cacheletIDs in reverse order for no particular reason
+      vptCacheletIDArray(i) := (cfg.numVPTEntries - 1 - i).U(vptIdxBits.W) 
+      vptWayMaskArray(i) := ~0.U((nWays - cfg.numNonEnclaveWays).W) // make wayMask all 1s
+    }
+  }
+
+  io.cacheletID := io.idx.map(i => vptCacheletIDArray(i))
+
+  io.wayMask(0) := vptWayMaskArray(io.idx(0))
+  io.wayMask(1) := vptWayMaskArray(io.idx(1))
+  io.wayMask(2) := vptWayMaskArray(io.idx(4))
+}
+
+class CAT(implicit p: Parameters) extends BoomModule()(p)
+  with HasL1HellaCacheParameters
+  with HasBoomCoreParameters
+{
+  val io = IO(new BoomBundle {
+    val idx        = Input(Vec(5, UInt(vptIdxBits.W)))
+    val cacheletID = Output(Vec(5, UInt(vptIdxBits.W)))
+    val wayMask    = Output(Vec(3, UInt((nWays - cfg.numNonEnclaveWays).W)))
+  })
+
+  val catWayMaskArray = Reg(Vec(cfg.numVPTEntries, UInt((nWays - cfg.numNonEnclaveWays).W)))
+
+  val lfsr = LFSR(22) // use a different width than the VPT's to prevent optimization
+  val lfsrWayMask = LFSR(nWays - cfg.numNonEnclaveWays)
+  val lfsrIdx = RegInit(0.U(vptIdxBits.W))
+  if (vptIdxBits == 1){
+    lfsrIdx := ~lfsrIdx
+  }
+  else {
+    lfsrIdx := LFSR(vptIdxBits)
+  }
+
+  when(lfsr === ~0.U(22.W)) { 
+    catWayMaskArray(lfsrIdx) := lfsrWayMask
+  }
+  .otherwise{
+    for (i <- 0 to cfg.numVPTEntries - 1) {
+      catWayMaskArray(i) := 0.U((nWays - cfg.numNonEnclaveWays).W)
+    }
+  }
+
+  io.cacheletID := (0 until 5).map(i => io.idx(i))
+
+  io.wayMask(0) := catWayMaskArray(io.idx(0))
+  io.wayMask(1) := catWayMaskArray(io.idx(1))
+  io.wayMask(2) := catWayMaskArray(io.idx(4))
+}
+
+class MLC(implicit p: Parameters) extends BoomModule()(p) 
+  with HasL1HellaCacheParameters
+  with HasBoomCoreParameters
+{
+  val io = IO(new BoomBundle {
+    // val enclaveMode = Input(Bool()) // just use an internal enclaveMode instead (for simplicity)
+    val idx        = Input(Vec(5, UInt(vptIdxBits.W)))
+    val cacheletID = Output(Vec(5, UInt(vptIdxBits.W)))
+    val wayMask    = Output(Vec(3, UInt((nWays - cfg.numNonEnclaveWays).W)))
+  })
+
+  val enclaveMode = RegInit(1.U(1.W))
+  val lfsr = LFSR(21)
+  when (lfsr === ~0.U(21.W)){
+    enclaveMode := ~enclaveMode
+  }
+
+  // Instantiate one VPT, one CAT
+  val vpt = Module(new VPT)
+  val cat = Module(new CAT)
+
+  vpt.io.idx := io.idx
+  cat.io.idx := io.idx
+
+  when (enclaveMode === 1.U){
+    io.cacheletID := vpt.io.cacheletID
+    io.wayMask := vpt.io.wayMask
+  }
+  .otherwise {
+    io.cacheletID := cat.io.cacheletID
+    io.wayMask := cat.io.wayMask
+  }
+
+  /* Old MLC
+  val vptCacheletIDArray = Reg(Vec(cfg.numVPTEntries, UInt(vptIdxBits.W)))
+  val vptWayMaskArray = Reg(Vec(cfg.numVPTEntries, UInt((nWays - cfg.numNonEnclaveWays).W)))
+
   val lfsr = LFSR(32)
   val lfsrWayMask = LFSR(nWays - cfg.numNonEnclaveWays)
   // there's no support for LFSR with width 1...
@@ -324,7 +425,7 @@ class MLC(implicit p: Parameters) extends BoomModule()(p)
   // haven't implemented the waymask yet
   io.wayMask(0) := vptWayMaskArray(io.idx(0))
   io.wayMask(1) := vptWayMaskArray(io.idx(1))
-  io.wayMask(2) := vptWayMaskArray(io.idx(4))
+  io.wayMask(2) := vptWayMaskArray(io.idx(4)) */
 }
 
 abstract class AbstractBoomDataArray(implicit p: Parameters) extends BoomModule with HasL1HellaCacheParameters {
@@ -490,8 +591,8 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
 
   val t_replay :: t_probe :: t_wb :: t_mshr_meta_read :: t_lsu :: t_prefetch :: Nil = Enum(6)
 
-  val vpt = Module(new MLC)
-  vpt.io := DontCare
+  val mlc = Module(new MLC)
+  mlc.io := DontCare
   val enableMLC = cfg.enableMLC
   val numVPTEntries = cfg.numVPTEntries
   val numNonEnclaveWays = cfg.numNonEnclaveWays
@@ -522,7 +623,7 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
 
   metaReadArb.io.in := DontCare
   for (w <- 0 until memWidth) {
-    meta(w).io.wayMask := vpt.io.wayMask(0)
+    meta(w).io.wayMask := mlc.io.wayMask(0)
     meta(w).io.enclaveMode := 1.U
 
     meta(w).io.write.valid := metaWriteArb.io.out.fire
@@ -530,8 +631,8 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
     if (enableMLC){
       meta(w).io.write.bits  := metaWriteArb.io.out.bits
       val metaWriteVptIdx = metaWriteArb.io.out.bits.idx >> (idxBits - vptIdxBits) // upper bits of set index
-      vpt.io.idx(0) := metaWriteVptIdx
-      val metaWriteNewIdx = Cat(vpt.io.cacheletID(0), metaWriteArb.io.out.bits.idx(idxBits-vptIdxBits-1,0))
+      mlc.io.idx(0) := metaWriteVptIdx
+      val metaWriteNewIdx = Cat(mlc.io.cacheletID(0), metaWriteArb.io.out.bits.idx(idxBits-vptIdxBits-1,0))
       meta(w).io.write.bits.idx := metaWriteNewIdx
       meta(w).io.write.bits.data.tag  := Cat(metaWriteVptIdx, metaWriteArb.io.out.bits.data.tag(tagBits-1, 0))
       when (meta(w).io.write.valid && (w == 0).B) {
@@ -547,8 +648,8 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
 
       meta(w).io.read.bits   := metaReadArb.io.out.bits.req(w)
       val metaReadVptIdx = metaReadArb.io.out.bits.req(w).idx >> (idxBits - vptIdxBits) // upper bits of set index
-      vpt.io.idx(1) := metaReadVptIdx
-      val metaReadNewIdx = Cat(vpt.io.cacheletID(1), metaReadArb.io.out.bits.req(w).idx(idxBits-vptIdxBits-1, 0))
+      mlc.io.idx(1) := metaReadVptIdx
+      val metaReadNewIdx = Cat(mlc.io.cacheletID(1), metaReadArb.io.out.bits.req(w).idx(idxBits-vptIdxBits-1, 0))
       meta(w).io.read.bits.tag := Cat(metaReadVptIdx(vptIdxBits-1,0), metaReadArb.io.out.bits.req(w).tag)
       meta(w).io.read.bits.way_en := metaReadArb.io.out.bits.req(w).way_en
       meta(w).io.read.bits.idx := metaReadNewIdx
@@ -584,8 +685,8 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
       data.io.read(w).bits  := dataReadArb.io.out.bits.req(w) // ?
       val dataReadSetIdx = dataReadArb.io.out.bits.req(w).addr >> blockOffBits
       val dataReadVptIdx = dataReadSetIdx >> (idxBits - vptIdxBits)
-      vpt.io.idx(2) := dataReadVptIdx
-      val dataReadNewIdx = Cat(vpt.io.cacheletID(2), dataReadSetIdx(idxBits-vptIdxBits-1, 0))
+      mlc.io.idx(2) := dataReadVptIdx
+      val dataReadNewIdx = Cat(mlc.io.cacheletID(2), dataReadSetIdx(idxBits-vptIdxBits-1, 0))
       data.io.read(w).bits.addr  := Cat(dataReadNewIdx, dataReadArb.io.out.bits.req(w).addr(blockOffBits-1,0))
       when (data.io.read(w).valid && (w == 0).B) {
         printf(p"- Data Read -\n")
@@ -608,8 +709,8 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
     data.io.write.bits  := dataWriteArb.io.out.bits // ?
     val dataWriteSetIdx = dataWriteArb.io.out.bits.addr >> blockOffBits
     val dataWriteVptIdx = dataWriteSetIdx >> (idxBits - vptIdxBits)
-    vpt.io.idx(3) := dataWriteVptIdx
-    val dataWriteNewIdx = Cat(vpt.io.cacheletID(3), dataWriteSetIdx(idxBits-vptIdxBits-1, 0))
+    mlc.io.idx(3) := dataWriteVptIdx
+    val dataWriteNewIdx = Cat(mlc.io.cacheletID(3), dataWriteSetIdx(idxBits-vptIdxBits-1, 0))
     data.io.write.bits.addr  := Cat(dataWriteNewIdx, dataWriteArb.io.out.bits.addr(blockOffBits - 1, 0))
     when (data.io.write.valid) {
       printf(p"- Data Write -\n")
@@ -771,8 +872,8 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
   //if (enableMLC){ // this if statement doesn't work, will look for a solution at some point
     val reqSetIdx = widthMap(i => s1_addr(i) >> blockOffBits)
     val reqVptIdx = widthMap(i => reqSetIdx(i) >> (idxBits - vptIdxBits))
-    vpt.io.idx(4) := reqVptIdx(0)(vptIdxBits-1, 0)
-    val reqNewSetIdx = widthMap(i => Cat(vpt.io.cacheletID(4), reqSetIdx(i)(idxBits-vptIdxBits-1,0)))
+    mlc.io.idx(4) := reqVptIdx(0)(vptIdxBits-1, 0)
+    val reqNewSetIdx = widthMap(i => Cat(mlc.io.cacheletID(4), reqSetIdx(i)(idxBits-vptIdxBits-1,0)))
     val reqTag = widthMap(i => s1_addr(i) >> untagBits)
     val s1_addr_remapped = widthMap(i => Cat(reqVptIdx(i)(vptIdxBits-1, 0), reqTag(i)(tagBits-1,0), reqNewSetIdx(i), s1_addr(i)(blockOffBits-1,0)))
     val s2_addr_remapped = RegNext(s1_addr_remapped)
@@ -903,7 +1004,7 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
 
   // replacement policy
   val replacer = cacheParams.replacement
-  replacer.wayMask := RegNext(vpt.io.wayMask(2))
+  replacer.wayMask := RegNext(mlc.io.wayMask(2))
   val s2_replaced_way_en = UIntToOH(RegNext(replacer.way)) // <---- MODIFY REPLACER
   val s2_repl_meta = widthMap(i => Mux1H(s2_replaced_way_en, wayMap((w: Int) => RegNext(meta(i).io.resp(w))).toSeq))
 
